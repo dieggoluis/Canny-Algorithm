@@ -3,27 +3,25 @@
 
 #include <iostream>
 #include <vector>
+#include <queue>
 #include <math.h>  // atan2
 
 using namespace cv;
 using namespace std;
 
-Mat float2byte(const Mat& If) {
-	double minVal, maxVal;
-	minMaxLoc(If,&minVal,&maxVal);
-	Mat Ib;
-	If.convertTo(Ib, CV_8U, 255.0/(maxVal - minVal),-minVal * 255.0/(maxVal - minVal));
-	return Ib;
-}
+#define BLACK 0
+#define WHITE 255
+#define debug(x) {cout << #x << " " << x << endl;}
+
 
 const float PI = 4 * atan(1);
 
 // global variables
 int sigma;
-int high_seuil; // % of the maximum
-int low_seuil;  // % of the maximum
+float high_seuil; // % of the maximum
+float low_seuil;  // % of the maximum
 
-const int sigma_slider_max = 15;
+const int sigma_slider_max = 20;
 int sigma_slider;
 const int max_slider_max = 50;
 int max_slider;
@@ -35,7 +33,14 @@ typedef struct _ {
 } Gradient;
 
 enum Direction { horizontal, vertical, diag1, diag2 };
-enum Contour { strong, weak, none };
+
+Mat float2byte(const Mat& If) {
+	double minVal, maxVal;
+	minMaxLoc(If,&minVal,&maxVal);
+	Mat Ib;
+	If.convertTo(Ib, CV_8U, 255.0/(maxVal - minVal),-minVal * 255.0/(maxVal - minVal));
+	return Ib;
+}
 
 // Find the closest direction considering the angle
 Direction get_direction (float angle) {
@@ -123,37 +128,6 @@ void thin_edge (const Mat& G, Mat& dst, const Mat& theta) {
     }
 }
 
-// strong: pixel gradient is higher than high thresthold value 
-// weak: pixel gradient is higher than low thresthold and smaller than high thresthold value 
-// eliminated: pixel gradient is smaller than low threshold and is eliminated
-vector<vector<Contour> > double_thresthold (Mat& I) {
-    int m = I.rows;
-    int n = I.cols;
-
-    double high_thr, low_thr;
-    minMaxLoc (I, &low_thr, &high_thr);
-    //high_thr % of the max
-    //low_thr % of the max
-    low_thr = (double)high_thr * low_seuil/100;
-    high_thr = (double)high_thr * high_seuil/100;
-
-    vector<vector <Contour> > dst;
-    dst.resize(m);
-    for (int i = 0; i < m; i++) {
-        dst[i].resize(n);
-        for (int j = 0; j < n; j++) {
-            float grad = I.at<float>(i,j);
-            if (grad > high_thr) 
-                dst[i][j] = strong;
-            else if (grad > low_thr && grad <= high_thr)
-                dst[i][j] = weak;
-            else
-                dst[i][j] = none;
-        }
-    }
-    return dst;
-}
-
 // check if (i,j) is a valid position for a matrix with m rows and n columns
 inline bool valid_pos (int i, int j, int m, int n) {
     if (i < 0) return false;
@@ -163,34 +137,75 @@ inline bool valid_pos (int i, int j, int m, int n) {
     return true;
 }
 
-// Edge tracking by hysteresis
-// Only weak edges connected with strong edges are kept
-void edge_tracking (Mat& dst, vector<vector<Contour> >& v) {
-    int m = v.size();
-    int n = v[0].size();
-    
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            if (v[i][j] != none) {
-                bool is_connected = false;
-                if ((valid_pos(i-1, j-1, m, n) && v[i-1][j-1] == strong) ||
-                        (valid_pos(i-1, j, m, n) && v[i-1][j] == strong) ||
-                        (valid_pos(i-1, j+1, m, n) && v[i-1][j+1] == strong) ||
-                        (valid_pos(i, j-1, m, n) && v[i][j-1] == strong) ||
-                        (valid_pos(i, j+1, m, n) && v[i][j+1] == strong) ||
-                        (valid_pos(i+1, j-1, m, n) && v[i+1][j-1] == strong) ||
-                        (valid_pos(i+1, j, m, n) && v[i+1][j] == strong) ||
-                        (valid_pos(i+1, j+1, m, n) && v[i+1][j+1] == strong)) {
-                    is_connected = true;
+// edge tracking using a BFS (breadth-first search)
+void BFS (pair<int, int> root, Mat& I, Mat& dst, vector<vector<bool> >& visited) {
+
+    //queue for the bfs
+    queue<pair<int, int> > q;
+    q.push(root);
+
+    visited[root.first][root.second] = true;
+    //root belongs to edge (root is always a pixel belonging to a "strong" edge)
+    dst.at<uchar>(root.first, root.second) = WHITE;
+        
+    while (!q.empty()) {
+        pair<int, int> current = q.front();
+        q.pop();
+
+        int k = 0;
+        int t = 0;
+
+        for (int i = 0; i < 3; i++) {
+            k = i+current.first-1;
+            for (int j = 0; j < 3; j++) {
+                t = j+current.second-1;
+                float grad = I.at<float>(k, t);
+                if (valid_pos(k, t, I.rows, I.cols) && !visited[k][t] && grad > low_seuil){
+                        visited[k][t] = true;
+                        dst.at<uchar>(k, t) = WHITE;
+                        q.push(make_pair(k, t));
                 }
-                if (is_connected) 
-                    dst.at<uchar>(i, j) = 255;
-                else
-                    dst.at<uchar>(i, j) = 0;
-            } else
-                dst.at<uchar>(i, j) = 0;
+            }
         }
     }
+}
+
+// run a BFS to each connected component 
+void BFS_edge_tracking (Mat& I, Mat& dst) {
+    //in the beginning there is no pixel visited
+    vector<vector<bool> > visited;
+    visited.resize (I.rows);
+    for (int i = 0; i < I.rows; i++) {
+        visited[i].resize (I.cols, false);
+    }
+
+    //initialize dst
+    for (int k = 0; k < I.rows; k++) {
+        for (int t = 0; t < I.cols; t++) {
+            dst.at<uchar>(k, t) = BLACK;
+        }
+    }
+
+    for (int i = 0; i < I.rows; i++) {
+        for (int j = 0; j < I.cols; j++) {
+            float grad = I.at<float>(i, j);
+            if (grad > high_seuil) {
+                BFS(make_pair(i, j), I, dst, visited);
+            } 
+        }
+    }
+}
+
+//calculate the maximum value of the matrix I
+inline float get_max_grad (Mat& I) {
+    float max_grad = 0.0;
+    for (int i = 0; i < I.rows; i++)
+        for (int j = 0; j < I.cols; j++) {
+            if (max_grad < I.at<float>(i, j)) {
+                max_grad = I.at<uchar>(i, j);
+            }
+        }
+    return max_grad;
 }
 
 // Canny algorithm
@@ -209,14 +224,15 @@ void canny (Mat& A) {
     // Non-maximum suppression
     thin_edge (grad.G, C, grad.theta);
 
-	//imshow(window_name,float2byte(C));
+    //calculate max of the gradient matrix
+    float max_grad = get_max_grad (C);
+    //set high and low thresholds
+    high_seuil = max_grad * (max_slider/100.0);
+    low_seuil = max_grad * (min_slider/100.0);
 
     // double threshold selection
-    vector<vector<Contour> > thresh_array = double_thresthold (C);
-
-    // Edge tracking by hysteresis
     Mat D (C.rows, C.cols, CV_8U);
-    edge_tracking (D, thresh_array);
+    BFS_edge_tracking (C, D);
     imshow ("Canny Algorithm", D);
 }
 
@@ -229,13 +245,11 @@ void onTrackbarSigma (int local_sigma, void* p) {
 
 void onTrackbarHighThreshold (int threshold, void* p) {
     Mat A = *(Mat*)p;
-    high_seuil = threshold;
     canny (A);
 }
 
 void onTrackbarLowThreshold (int threshold, void* p) {
     Mat A = *(Mat*)p;
-    low_seuil = threshold;
     canny (A);
 }
 
